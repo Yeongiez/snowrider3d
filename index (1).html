@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Snow Rider 3D</title>
+<style>
+  :root {
+    --deep-blue: #1a3a6b;
+    --accent: #ff5a5f;
+    --gold: #ffd166;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #bfe3ff;
+    font-family: 'Segoe UI', Tahoma, sans-serif;
+  }
+  #gameCanvas { display: block; width: 100%; height: 100%; }
+
+  #hud {
+    position: fixed; top: 14px; left: 14px; right: 14px;
+    display: flex; justify-content: space-between; align-items: flex-start;
+    pointer-events: none; z-index: 10;
+  }
+  #score, #speed {
+    font-size: 20px; font-weight: 800;
+    color: white;
+    background: rgba(20, 40, 70, 0.55);
+    padding: 8px 18px;
+    border-radius: 999px;
+    backdrop-filter: blur(4px);
+    text-shadow: 0 1px 3px rgba(0,0,0,0.4);
+  }
+  #speed { font-size: 15px; font-weight: 600; }
+
+  #overlay {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    background: linear-gradient(to bottom, rgba(60,110,180,0.75), rgba(10,20,45,0.85));
+    z-index: 20; text-align: center;
+    color: white;
+  }
+  #overlay h1 {
+    font-size: 46px; letter-spacing: 1px;
+    margin-bottom: 8px;
+    text-shadow: 0 3px 12px rgba(0,0,0,0.5);
+  }
+  #overlay p { font-size: 15px; opacity: 0.9; margin-bottom: 22px; max-width: 320px; }
+  #overlay button {
+    font-size: 18px; font-weight: 800;
+    padding: 14px 38px;
+    border: none; border-radius: 999px;
+    background: var(--accent); color: white;
+    cursor: pointer;
+    box-shadow: 0 6px 18px rgba(255,90,95,0.5);
+    transition: transform 0.15s ease;
+  }
+  #overlay button:active { transform: scale(0.96); }
+  #finalScore { font-size: 22px; font-weight: 800; margin-bottom: 6px; color: var(--gold); }
+  .hidden { display: none !important; }
+
+  #controls-hint {
+    position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%);
+    color: white; font-size: 12px; opacity: 0.75;
+    z-index: 10; text-align: center;
+    text-shadow: 0 1px 3px rgba(0,0,0,0.5);
+  }
+</style>
+</head>
+<body>
+
+<canvas id="gameCanvas"></canvas>
+
+<div id="hud">
+  <div id="score">Score: 0</div>
+  <div id="speed">Speed x1.0</div>
+</div>
+
+<div id="controls-hint">← → / A D to steer &nbsp;·&nbsp; ↑ / Space to jump &nbsp;·&nbsp; touch: swipe or tap</div>
+
+<div id="overlay">
+  <h1>🛷 Snow Rider 3D</h1>
+  <p>Sled down the mountain! Steer around trees and snowmen, jump over rocks, hit ramps to catch big air, and grab presents along the way!</p>
+  <button id="startBtn">Start Riding</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(() => {
+  const canvas = document.getElementById('gameCanvas');
+  const overlay = document.getElementById('overlay');
+  const startBtn = document.getElementById('startBtn');
+  const scoreEl = document.getElementById('score');
+  const speedEl = document.getElementById('speed');
+
+  // ---------- Scene ----------
+  const scene = new THREE.Scene();
+  scene.fog = new THREE.Fog(0xbfe3ff, 25, 110);
+
+  const camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 300);
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = true;
+
+  window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  // Sky gradient backdrop
+  const skyGeo = new THREE.SphereGeometry(250, 16, 16);
+  const skyMat = new THREE.ShaderMaterial({
+    uniforms: {
+      top: { value: new THREE.Color(0x6fb8f5) },
+      bottom: { value: new THREE.Color(0xdff0ff) }
+    },
+    vertexShader: `varying vec3 vPos; void main() { vPos = position; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+    fragmentShader: `varying vec3 vPos; uniform vec3 top; uniform vec3 bottom; void main() { float h = normalize(vPos).y * 0.5 + 0.5; gl_FragColor = vec4(mix(bottom, top, h), 1.0); }`,
+    side: THREE.BackSide
+  });
+  scene.add(new THREE.Mesh(skyGeo, skyMat));
+
+  // Lighting
+  scene.add(new THREE.HemisphereLight(0xffffff, 0xcfe6f9, 1.0));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.9);
+  sun.position.set(15, 30, 10);
+  sun.castShadow = true;
+  scene.add(sun);
+
+  // Distant mountains (simple low-poly peaks)
+  function makeMountainRow(zBase, scale, color) {
+    const group = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({ color });
+    for (let i = -6; i <= 6; i++) {
+      const h = 10 + Math.random() * 14;
+      const geo = new THREE.ConeGeometry(9 * scale, h * scale, 4);
+      const peak = new THREE.Mesh(geo, mat);
+      peak.position.set(i * 16 * scale + (Math.random() * 4 - 2), h * scale / 2 - 2, zBase);
+      peak.rotation.y = Math.random() * Math.PI;
+      group.add(peak);
+    }
+    return group;
+  }
+  const mtnFar = makeMountainRow(-140, 1.6, 0xaecdeb);
+  const mtnNear = makeMountainRow(-95, 1.1, 0x8fb8dd);
+  scene.add(mtnFar, mtnNear);
+
+  // ---------- Track ----------
+  const TRACK_HALF_WIDTH = 7;
+  const SEGMENT_LENGTH = 6;
+  const SEGMENT_COUNT = 26;
+
+  const trackGroup = new THREE.Group();
+  scene.add(trackGroup);
+
+  const snowMat = new THREE.MeshStandardMaterial({ color: 0xf6faff, roughness: 0.95 });
+  const segments = [];
+  for (let i = 0; i < SEGMENT_COUNT; i++) {
+    const geo = new THREE.PlaneGeometry(TRACK_HALF_WIDTH * 2, SEGMENT_LENGTH, 1, 1);
+    const mesh = new THREE.Mesh(geo, snowMat);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.position.z = -i * SEGMENT_LENGTH;
+    mesh.receiveShadow = true;
+    trackGroup.add(mesh);
+    segments.push(mesh);
+  }
+
+  // Pine forest along both sides (decorative, non-colliding)
+  const forestMat = new THREE.MeshStandardMaterial({ color: 0x2f6b3c });
+  const trunkMatDeco = new THREE.MeshStandardMaterial({ color: 0x5a3a22 });
+  const forest = new THREE.Group();
+  function decoTree(x, z, scale) {
+    const g = new THREE.Group();
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.25, 1, 6), trunkMatDeco);
+    trunk.position.y = 0.5 * scale;
+    g.add(trunk);
+    for (let i = 0; i < 3; i++) {
+      const cone = new THREE.Mesh(new THREE.ConeGeometry((1.1 - i * 0.22) * scale, 1.3 * scale, 8), forestMat);
+      cone.position.y = (1.3 + i * 0.9) * scale;
+      g.add(cone);
+    }
+    g.position.set(x, 0, z);
+    g.scale.setScalar(scale);
+    return g;
+  }
+  for (let i = 0; i < 40; i++) {
+    const z = -Math.random() * SEGMENT_LENGTH * SEGMENT_COUNT;
+    const side = Math.random() < 0.5 ? -1 : 1;
+    const x = side * (TRACK_HALF_WIDTH + 3 + Math.random() * 10);
+    forest.add(decoTree(x, z, 0.8 + Math.random() * 0.9));
+  }
+  scene.add(forest);
+
+  // candy-cane striped edge markers along the track, like the reference video
+  const caneStripeA = new THREE.MeshStandardMaterial({ color: 0xffffff });
+  const caneStripeB = new THREE.MeshStandardMaterial({ color: 0xd63b45 });
+  const canes = new THREE.Group();
+  function makeCane(x, z) {
+    const g = new THREE.Group();
+    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 1.3, 8), caneStripeA);
+    pole.position.y = 0.65;
+    g.add(pole);
+    for (let i = 0; i < 5; i++) {
+      const stripe = new THREE.Mesh(new THREE.CylinderGeometry(0.125, 0.125, 0.14, 8), i % 2 === 0 ? caneStripeB : caneStripeA);
+      stripe.position.y = 0.15 + i * 0.26;
+      g.add(stripe);
+    }
+    g.position.set(x, 0, z);
+    g.traverse(o => { if (o.isMesh) o.castShadow = true; });
+    return g;
+  }
+  for (let i = 0; i < 30; i++) {
+    const z = -i * 4;
+    canes.add(makeCane(-TRACK_HALF_WIDTH - 0.4, z));
+    canes.add(makeCane(TRACK_HALF_WIDTH + 0.4, z));
+  }
+  scene.add(canes);
+
+  // ---------- Sled + rider ----------
+  const player = new THREE.Group();
+
+  // sled base
+  const sledMat = new THREE.MeshStandardMaterial({ color: 0xe8503f });
+  const sledBase = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.18, 1.7), sledMat);
+  sledBase.position.y = 0.25;
+  sledBase.castShadow = true;
+  player.add(sledBase);
+  // curved front tip
+  const tip = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.45, 0.18, 8, 1, false, 0, Math.PI), sledMat);
+  tip.rotation.z = Math.PI / 2;
+  tip.rotation.y = Math.PI / 2;
+  tip.position.set(0, 0.25, -0.85);
+  player.add(tip);
+  // runners
+  const runnerMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a });
+  [-0.35, 0.35].forEach(x => {
+    const runner = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.12, 1.9), runnerMat);
+    runner.position.set(x, 0.08, 0);
+    player.add(runner);
+  });
+
+  // rider — compact, sits low on the sled so it reads clearly from behind
+  const rider = new THREE.Group();
+  const jacketMat = new THREE.MeshStandardMaterial({ color: 0x2e7d5b });
+  const torso = new THREE.Mesh(new THREE.CapsuleGeometry ? new THREE.SphereGeometry(0.34, 10, 10) : new THREE.SphereGeometry(0.34, 10, 10), jacketMat);
+  torso.scale.set(1, 1.15, 0.85);
+  torso.position.set(0, 0.62, 0.1);
+  rider.add(torso);
+
+  const headMat = new THREE.MeshStandardMaterial({ color: 0xffe0bd });
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 12, 12), headMat);
+  head.position.set(0, 1.08, -0.05);
+  rider.add(head);
+
+  const hatMat = new THREE.MeshStandardMaterial({ color: 0xd63b45 });
+  const hat = new THREE.Mesh(new THREE.ConeGeometry(0.24, 0.42, 10), hatMat);
+  hat.position.set(0, 1.32, -0.05);
+  rider.add(hat);
+  const pom = new THREE.Mesh(new THREE.SphereGeometry(0.075, 8, 8), new THREE.MeshStandardMaterial({ color: 0xffffff }));
+  pom.position.set(0, 1.54, -0.05);
+  rider.add(pom);
+
+  [-0.32, 0.32].forEach(x => {
+    const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.075, 0.42, 6), jacketMat);
+    arm.position.set(x, 0.6, 0.28);
+    arm.rotation.x = -0.7;
+    rider.add(arm);
+  });
+
+  rider.traverse(o => { if (o.isMesh) o.castShadow = true; });
+  rider.position.set(0, 0, 0.05);
+  player.add(rider);
+
+  // face on the front tip so the sled itself reads as the character
+  const eyeMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a });
+  [-0.16, 0.16].forEach(x => {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 8), eyeMat);
+    eye.position.set(x, 0.42, -0.98);
+    player.add(eye);
+  });
+  const smileMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a });
+  const smile = new THREE.Mesh(new THREE.TorusGeometry(0.13, 0.02, 6, 10, Math.PI), smileMat);
+  smile.position.set(0, 0.32, -0.98);
+  smile.rotation.z = Math.PI;
+  player.add(smile);
+  // little scarf for personality
+  const scarfMat = new THREE.MeshStandardMaterial({ color: 0xd63b45 });
+  const scarf = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.09, 8, 16), scarfMat);
+  scarf.rotation.x = Math.PI / 2;
+  scarf.position.set(0, 0.42, -0.65);
+  player.add(scarf);
+
+  player.position.set(0, 0, 0);
+  scene.add(player);
+  player.traverse(o => { if (o.isMesh) o.castShadow = true; });
+
+  // snow spray trail
+  const trailGeo = new THREE.BufferGeometry();
+  const TRAIL_COUNT = 60;
+  const trailPositions = new Float32Array(TRAIL_COUNT * 3);
+  for (let i = 0; i < TRAIL_COUNT; i++) trailPositions[i * 3 + 1] = -10;
+  trailGeo.setAttribute('position', new THREE.BufferAttribute(trailPositions, 3));
+  const trailMat = new THREE.PointsMaterial({ color: 0xffffff, size: 0.18, transparent: true, opacity: 0.85 });
+  const trail = new THREE.Points(trailGeo, trailMat);
+  scene.add(trail);
+  let trailIdx = 0;
+
+  // ---------- Obstacles, ramps & coins ----------
+  const obstacles = [];
+  const coins = [];
+  const ramps = [];
+
+  function makeTree() {
+    const g = new THREE.Group();
+    const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.2, 0.8, 6), trunkMatDeco);
+    trunk.position.y = 0.4;
+    g.add(trunk);
+    for (let i = 0; i < 3; i++) {
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(0.9 - i * 0.2, 1.0, 8), forestMat);
+      cone.position.y = 1.0 + i * 0.7;
+      g.add(cone);
+    }
+    g.scale.setScalar(1.6);
+    g.traverse(o => { if (o.isMesh) o.castShadow = true; });
+    g.userData.clearHeight = 2.6 * 1.6; // too tall to jump over
+    return g;
+  }
+
+  function makeRock() {
+    const geo = new THREE.DodecahedronGeometry(0.6, 0);
+    const mat = new THREE.MeshStandardMaterial({ color: 0x8a8f98, roughness: 1 });
+    const rock = new THREE.Mesh(geo, mat);
+    rock.position.y = 0.4;
+    rock.rotation.set(Math.random(), Math.random(), Math.random());
+    rock.scale.setScalar(1.5);
+    rock.castShadow = true;
+    rock.userData.clearHeight = 0.75 * 1.5; // low enough to jump over
+    return rock;
+  }
+
+  function makeSnowman() {
+    const g = new THREE.Group();
+    const mat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+    const bottom = new THREE.Mesh(new THREE.SphereGeometry(0.45, 10, 10), mat);
+    bottom.position.y = 0.45;
+    const mid = new THREE.Mesh(new THREE.SphereGeometry(0.32, 10, 10), mat);
+    mid.position.y = 1.05;
+    const top = new THREE.Mesh(new THREE.SphereGeometry(0.22, 10, 10), mat);
+    top.position.y = 1.5;
+    const noseMat = new THREE.MeshStandardMaterial({ color: 0xff8c3d });
+    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.25, 6), noseMat);
+    nose.rotation.x = Math.PI / 2;
+    nose.position.set(0, 1.5, 0.24);
+    g.add(bottom, mid, top, nose);
+    g.scale.setScalar(1.5);
+    g.traverse(o => { if (o.isMesh) o.castShadow = true; });
+    g.userData.clearHeight = 1.9 * 1.5; // too tall to jump over
+    return g;
+  }
+
+  const PRESENT_COLORS = [0xe8503f, 0x3b7dd8, 0x2e7d5b, 0xffd166];
+  function makePresent() {
+    const g = new THREE.Group();
+    const boxColor = PRESENT_COLORS[Math.floor(Math.random() * PRESENT_COLORS.length)];
+    const boxMat = new THREE.MeshStandardMaterial({ color: boxColor, roughness: 0.6 });
+    const box = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.5, 0.55), boxMat);
+    g.add(box);
+    const ribbonMat = new THREE.MeshStandardMaterial({ color: 0xffd166, metalness: 0.4, roughness: 0.3 });
+    const ribbonX = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.12, 0.58), ribbonMat);
+    g.add(ribbonX);
+    const ribbonZ = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.58, 0.58), ribbonMat);
+    g.add(ribbonZ);
+    const bowGeo = new THREE.TorusGeometry(0.1, 0.045, 8, 12);
+    const bowL = new THREE.Mesh(bowGeo, ribbonMat);
+    bowL.position.set(-0.08, 0.3, 0);
+    bowL.rotation.y = Math.PI / 5;
+    const bowR = new THREE.Mesh(bowGeo, ribbonMat);
+    bowR.position.set(0.08, 0.3, 0);
+    bowR.rotation.y = -Math.PI / 5;
+    g.add(bowL, bowR);
+    g.traverse(o => { if (o.isMesh) o.castShadow = true; });
+    return g;
+  }
+
+  function makeRamp() {
+    const mat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+    const ramp = new THREE.Mesh(new THREE.BoxGeometry(LANE_WIDTH_VAL() * 0.9, 0.6, 2.2), mat);
+    ramp.rotation.x = -0.35;
+    ramp.position.y = 0.3;
+    ramp.castShadow = true;
+    return ramp;
+  }
+  function LANE_WIDTH_VAL() { return 3.0; }
+
+  const LANE_WIDTH = 3.0;
+  const LANE_X = [-LANE_WIDTH, 0, LANE_WIDTH];
+
+  const OBSTACLE_BUILDERS = [makeTree, makeRock, makeSnowman];
+
+  function spawnRow(zPos) {
+    const laneChoices = [0, 1, 2];
+    const blockedLane = laneChoices[Math.floor(Math.random() * laneChoices.length)];
+    const rampChance = Math.random() < 0.12;
+
+    laneChoices.forEach(lane => {
+      const x = LANE_X[lane];
+      if (rampChance && lane === blockedLane) {
+        const ramp = makeRamp();
+        ramp.position.set(x, ramp.position.y, zPos);
+        ramp.userData.type = 'ramp';
+        scene.add(ramp);
+        ramps.push(ramp);
+      } else if (lane === blockedLane) {
+        const builder = OBSTACLE_BUILDERS[Math.floor(Math.random() * OBSTACLE_BUILDERS.length)];
+        const obj = builder();
+        obj.position.set(x, obj.position.y || 0, zPos);
+        obj.userData.type = 'obstacle';
+        scene.add(obj);
+        obstacles.push(obj);
+      } else if (Math.random() < 0.65) {
+        const present = makePresent();
+        present.position.set(x, 0.55, zPos);
+        present.userData.type = 'present';
+        scene.add(present);
+        coins.push(present);
+      }
+    });
+  }
+
+  // ---------- Game state ----------
+  let running = false;
+  let score = 0;
+  const baseSpeed = 0.28;
+  let speed = baseSpeed;
+  let distance = 0;
+  let playerLane = 1;
+  let targetX = LANE_X[1];
+  let nextSpawnZ = -30;
+  const SPAWN_GAP = 8;
+
+  let airborne = false;
+  let jumpVel = 0;
+  const GRAVITY = 0.028;
+
+  function resetGame() {
+    [...obstacles, ...coins, ...ramps].forEach(o => scene.remove(o));
+    obstacles.length = 0; coins.length = 0; ramps.length = 0;
+    score = 0; speed = baseSpeed; distance = 0;
+    playerLane = 1; targetX = LANE_X[1];
+    player.position.set(0, 0, 0);
+    airborne = false; jumpVel = 0;
+    nextSpawnZ = -30;
+    for (let z = -30; z > -30 - SPAWN_GAP * 14; z -= SPAWN_GAP) spawnRow(z);
+    updateHud();
+  }
+
+  function updateHud() {
+    scoreEl.textContent = `Score: ${Math.floor(score)}`;
+    speedEl.textContent = `Speed x${(speed / baseSpeed).toFixed(1)}`;
+  }
+
+  function gameOver() {
+    running = false;
+    overlay.classList.remove('hidden');
+    overlay.innerHTML = `
+      <h1>💥 Wipeout!</h1>
+      <div id="finalScore">Score: ${Math.floor(score)}</div>
+      <p>You crashed on the slope. Give it another run?</p>
+      <button id="restartBtn">Ride Again</button>
+    `;
+    document.getElementById('restartBtn').addEventListener('click', () => {
+      overlay.classList.add('hidden');
+      resetGame();
+      running = true;
+    });
+  }
+
+  // ---------- Controls ----------
+  function moveLeft() { playerLane = Math.max(0, playerLane - 1); targetX = LANE_X[playerLane]; }
+  function moveRight() { playerLane = Math.min(2, playerLane + 1); targetX = LANE_X[playerLane]; }
+  function doJump() { if (!airborne) { airborne = true; jumpVel = 0.42; } }
+
+  window.addEventListener('keydown', (e) => {
+    if (!running) return;
+    if (e.key === 'ArrowLeft' || e.key.toLowerCase() === 'a') moveLeft();
+    if (e.key === 'ArrowRight' || e.key.toLowerCase() === 'd') moveRight();
+    if (e.key === ' ' || e.key === 'ArrowUp' || e.key.toLowerCase() === 'w') { e.preventDefault(); doJump(); }
+  });
+
+  let touchStartX = null;
+  let touchStartY = null;
+  canvas.addEventListener('touchstart', (e) => {
+    touchStartX = e.touches[0].clientX;
+    touchStartY = e.touches[0].clientY;
+  });
+  canvas.addEventListener('touchend', (e) => {
+    if (!running || touchStartX === null) return;
+    const dx = e.changedTouches[0].clientX - touchStartX;
+    const dy = e.changedTouches[0].clientY - touchStartY;
+    if (Math.abs(dy) > 40 && dy < 0) { doJump(); }
+    else if (Math.abs(dx) > 30) { if (dx < 0) moveLeft(); else moveRight(); }
+    else { if (touchStartX < window.innerWidth / 2) moveLeft(); else moveRight(); }
+    touchStartX = null;
+    touchStartY = null;
+  });
+
+  // ---------- Collisions ----------
+  function checkCollisions() {
+    const px = player.position.x;
+    const pz = player.position.z;
+
+    const py = player.position.y;
+    for (let i = obstacles.length - 1; i >= 0; i--) {
+      const o = obstacles[i];
+      const clearHeight = o.userData.clearHeight || 2.6;
+      const clearedByJump = py > clearHeight * 0.55;
+      if (!clearedByJump && Math.abs(o.position.z - pz) < 1.15 && Math.abs(o.position.x - px) < 1.15) {
+        gameOver();
+        return;
+      }
+      if (o.position.z > pz + 5) { scene.remove(o); obstacles.splice(i, 1); }
+    }
+
+    for (let i = ramps.length - 1; i >= 0; i--) {
+      const r = ramps[i];
+      if (!airborne && Math.abs(r.position.z - pz) < 1.0 && Math.abs(r.position.x - px) < 1.2) {
+        airborne = true;
+        jumpVel = 0.55;
+        score += 15;
+      }
+      if (r.position.z > pz + 5) { scene.remove(r); ramps.splice(i, 1); }
+    }
+
+    for (let i = coins.length - 1; i >= 0; i--) {
+      const c = coins[i];
+      if (Math.abs(c.position.z - pz) < 1.0 && Math.abs(c.position.x - px) < 1.0) {
+        score += 10;
+        scene.remove(c); coins.splice(i, 1);
+        continue;
+      }
+      c.rotation.y += 0.08;
+      if (c.position.z > pz + 5) { scene.remove(c); coins.splice(i, 1); }
+    }
+  }
+
+  // ---------- Main loop ----------
+  const clock = new THREE.Clock();
+
+  function animate() {
+    requestAnimationFrame(animate);
+    const dt = Math.min(clock.getDelta(), 0.05);
+
+    if (running) {
+      distance += speed;
+      speed = baseSpeed + distance * 0.0006;
+      score += dt * 6;
+
+      const worldSpeed = speed;
+
+      segments.forEach(seg => {
+        seg.position.z += worldSpeed;
+        if (seg.position.z > SEGMENT_LENGTH * 2) seg.position.z -= SEGMENT_LENGTH * SEGMENT_COUNT;
+      });
+      forest.children.forEach(t => {
+        t.position.z += worldSpeed;
+        if (t.position.z > 10) t.position.z -= SEGMENT_LENGTH * SEGMENT_COUNT;
+      });
+      canes.children.forEach(c => {
+        c.position.z += worldSpeed;
+        if (c.position.z > 10) c.position.z -= 4 * 30;
+      });
+
+      obstacles.forEach(o => o.position.z += worldSpeed);
+      coins.forEach(c => c.position.z += worldSpeed);
+      ramps.forEach(r => r.position.z += worldSpeed);
+
+      nextSpawnZ += worldSpeed;
+      if (nextSpawnZ > -SPAWN_GAP * 9) { spawnRow(-SPAWN_GAP * 12); nextSpawnZ = -SPAWN_GAP * 12; }
+
+      // lane steering
+      player.position.x += (targetX - player.position.x) * 0.18;
+      player.rotation.z = (targetX - player.position.x) * -0.18;
+      player.rotation.y = (targetX - player.position.x) * -0.12;
+
+      // jump physics
+      if (airborne) {
+        jumpVel -= GRAVITY;
+        player.position.y += jumpVel;
+        if (player.position.y <= 0) { player.position.y = 0; airborne = false; jumpVel = 0; }
+      }
+      // sled tilt while airborne
+      sledBase.rotation.x = airborne ? -jumpVel * 0.6 : 0;
+
+      // snow trail (only when grounded)
+      if (!airborne) {
+        const pos = trail.geometry.attributes.position.array;
+        trailIdx = (trailIdx + 1) % TRAIL_COUNT;
+        pos[trailIdx * 3] = player.position.x + (Math.random() - 0.5) * 0.5;
+        pos[trailIdx * 3 + 1] = 0.15;
+        pos[trailIdx * 3 + 2] = player.position.z + 0.9 + Math.random() * 0.3;
+        trail.geometry.attributes.position.needsUpdate = true;
+      }
+      trail.children && null;
+      // fade trail forward with world movement
+      const tpos = trail.geometry.attributes.position.array;
+      for (let i = 0; i < TRAIL_COUNT; i++) tpos[i * 3 + 2] += worldSpeed;
+      trail.geometry.attributes.position.needsUpdate = true;
+
+      // camera: close third-person, right behind and slightly above the sled
+      camera.position.x += ((player.position.x) - camera.position.x) * 0.2;
+      camera.position.y = 2.1 + player.position.y * 0.5;
+      camera.position.z = player.position.z + 3.6;
+      camera.up.set(0, 1, 0);
+      camera.lookAt(
+        player.position.x + (targetX - player.position.x) * 0.3,
+        0.9 + player.position.y * 0.6,
+        player.position.z - 10
+      );
+
+      checkCollisions();
+      updateHud();
+    }
+
+    renderer.render(scene, camera);
+  }
+
+  startBtn.addEventListener('click', () => { overlay.classList.add('hidden'); resetGame(); running = true; });
+
+  camera.position.set(0, 3.4, 6.5);
+  resetGame();
+  animate();
+})();
+</script>
+</body>
+</html>
